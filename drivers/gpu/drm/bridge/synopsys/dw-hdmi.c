@@ -189,6 +189,7 @@ struct dw_hdmi {
 	struct regmap *regm;
 	void (*enable_audio)(struct dw_hdmi *hdmi);
 	void (*disable_audio)(struct dw_hdmi *hdmi);
+	void (*update_eld)(struct device *dev, u8 *eld);
 
 	struct cec_notifier *cec_notifier;
 };
@@ -508,8 +509,14 @@ static void hdmi_set_cts_n(struct dw_hdmi *hdmi, unsigned int cts,
 	/* nshift factor = 0 */
 	hdmi_modb(hdmi, 0, HDMI_AUD_CTS3_N_SHIFT_MASK, HDMI_AUD_CTS3);
 
-	hdmi_writeb(hdmi, ((cts >> 16) & HDMI_AUD_CTS3_AUDCTS19_16_MASK) |
-		    HDMI_AUD_CTS3_CTS_MANUAL, HDMI_AUD_CTS3);
+	/* Use automatic CTS generation mode when CTS is not set */
+	if (cts)
+		hdmi_writeb(hdmi, ((cts >> 16) &
+				   HDMI_AUD_CTS3_AUDCTS19_16_MASK) |
+				  HDMI_AUD_CTS3_CTS_MANUAL,
+			    HDMI_AUD_CTS3);
+	else
+		hdmi_writeb(hdmi, 0, HDMI_AUD_CTS3);
 	hdmi_writeb(hdmi, (cts >> 8) & 0xff, HDMI_AUD_CTS2);
 	hdmi_writeb(hdmi, cts & 0xff, HDMI_AUD_CTS1);
 
@@ -574,29 +581,58 @@ static unsigned int hdmi_compute_n(unsigned int freq, unsigned long pixel_clk)
 	return n;
 }
 
+/*
+ * When transmitting IEC60958 linear PCM audio, these registers allow to
+ * configure the channel status information of all the channel status
+ * bits in the IEC60958 frame. For the moment this configuration is only
+ * used when the I2S audio interface, General Purpose Audio (GPA),
+ * or AHB audio DMA (AHBAUDDMA) interface is active
+ * (for S/PDIF interface this information comes from the stream).
+ */
+void dw_hdmi_set_channel_status(struct dw_hdmi *hdmi,
+				u8 *channel_status)
+{
+	/*
+	 * Set channel status register for frequency and word length.
+	 * Use default values for other registers.
+	 */
+	hdmi_writeb(hdmi, channel_status[3], HDMI_FC_AUDSCHNLS7);
+	hdmi_writeb(hdmi, channel_status[4], HDMI_FC_AUDSCHNLS8);
+}
+EXPORT_SYMBOL_GPL(dw_hdmi_set_channel_status);
+
 static void hdmi_set_clk_regenerator(struct dw_hdmi *hdmi,
 	unsigned long pixel_clk, unsigned int sample_rate)
 {
 	unsigned long ftdms = pixel_clk;
 	unsigned int n, cts;
+	u8 config3;
 	u64 tmp;
 
 	n = hdmi_compute_n(sample_rate, pixel_clk);
 
-	/*
-	 * Compute the CTS value from the N value.  Note that CTS and N
-	 * can be up to 20 bits in total, so we need 64-bit math.  Also
-	 * note that our TDMS clock is not fully accurate; it is accurate
-	 * to kHz.  This can introduce an unnecessary remainder in the
-	 * calculation below, so we don't try to warn about that.
-	 */
-	tmp = (u64)ftdms * n;
-	do_div(tmp, 128 * sample_rate);
-	cts = tmp;
+	config3 = hdmi_readb(hdmi, HDMI_CONFIG3_ID);
 
-	dev_dbg(hdmi->dev, "%s: fs=%uHz ftdms=%lu.%03luMHz N=%d cts=%d\n",
-		__func__, sample_rate, ftdms / 1000000, (ftdms / 1000) % 1000,
-		n, cts);
+	/* Only compute CTS when using internal AHB audio */
+	if (config3 & HDMI_CONFIG3_AHBAUDDMA) {
+		/*
+		 * Compute the CTS value from the N value.  Note that CTS and N
+		 * can be up to 20 bits in total, so we need 64-bit math.  Also
+		 * note that our TDMS clock is not fully accurate; it is
+		 * accurate to kHz.  This can introduce an unnecessary remainder
+		 * in the calculation below, so we don't try to warn about that.
+		 */
+		tmp = (u64)ftdms * n;
+		do_div(tmp, 128 * sample_rate);
+		cts = tmp;
+
+		dev_dbg(hdmi->dev, "%s: fs=%uHz ftdms=%lu.%03luMHz N=%d cts=%d\n",
+			__func__, sample_rate,
+			ftdms / 1000000, (ftdms / 1000) % 1000,
+			n, cts);
+	} else {
+		cts = 0;
+	}
 
 	spin_lock_irq(&hdmi->audio_lock);
 	hdmi->audio_n = n;
@@ -629,6 +665,42 @@ void dw_hdmi_set_sample_rate(struct dw_hdmi *hdmi, unsigned int rate)
 	mutex_unlock(&hdmi->audio_mutex);
 }
 EXPORT_SYMBOL_GPL(dw_hdmi_set_sample_rate);
+
+void dw_hdmi_set_channel_count(struct dw_hdmi *hdmi, unsigned int cnt)
+{
+	u8 layout;
+
+	mutex_lock(&hdmi->audio_mutex);
+
+	/*
+	 * For >2 channel PCM audio, we need to select layout 1
+	 * and set an appropriate channel map.
+	 */
+	if (cnt > 2)
+		layout = HDMI_FC_AUDSCONF_AUD_PACKET_LAYOUT_LAYOUT1;
+	else
+		layout = HDMI_FC_AUDSCONF_AUD_PACKET_LAYOUT_LAYOUT0;
+
+	hdmi_modb(hdmi, layout, HDMI_FC_AUDSCONF_AUD_PACKET_LAYOUT_MASK,
+		  HDMI_FC_AUDSCONF);
+
+	/* Set the audio infoframes channel count */
+	hdmi_modb(hdmi, (cnt - 1) << HDMI_FC_AUDICONF0_CC_OFFSET,
+		  HDMI_FC_AUDICONF0_CC_MASK, HDMI_FC_AUDICONF0);
+
+	mutex_unlock(&hdmi->audio_mutex);
+}
+EXPORT_SYMBOL_GPL(dw_hdmi_set_channel_count);
+
+void dw_hdmi_set_channel_allocation(struct dw_hdmi *hdmi, unsigned int ca)
+{
+	mutex_lock(&hdmi->audio_mutex);
+
+	hdmi_writeb(hdmi, ca, HDMI_FC_AUDICONF2);
+
+	mutex_unlock(&hdmi->audio_mutex);
+}
+EXPORT_SYMBOL_GPL(dw_hdmi_set_channel_allocation);
 
 static void hdmi_enable_audio_clk(struct dw_hdmi *hdmi, bool enable)
 {
@@ -683,6 +755,19 @@ void dw_hdmi_audio_disable(struct dw_hdmi *hdmi)
 	spin_unlock_irqrestore(&hdmi->audio_lock, flags);
 }
 EXPORT_SYMBOL_GPL(dw_hdmi_audio_disable);
+
+static void dw_hdmi_update_eld(struct dw_hdmi *hdmi, u8 *eld)
+{
+	if (hdmi->audio && hdmi->update_eld)
+		hdmi->update_eld(&hdmi->audio->dev, eld);
+}
+
+void dw_hdmi_set_update_eld(struct dw_hdmi *hdmi,
+			    void (*update_eld)(struct device *dev, u8 *eld))
+{
+	hdmi->update_eld = update_eld;
+}
+EXPORT_SYMBOL_GPL(dw_hdmi_set_update_eld);
 
 static bool hdmi_bus_fmt_is_rgb(unsigned int bus_format)
 {
@@ -1972,7 +2057,7 @@ static int dw_hdmi_setup(struct dw_hdmi *hdmi, struct drm_display_mode *mode)
 
 		/* HDMI Initialization Step E - Configure audio */
 		hdmi_clk_regenerator_update_pixel_clock(hdmi);
-		hdmi_enable_audio_clk(hdmi, true);
+		hdmi_enable_audio_clk(hdmi, hdmi->audio_enable);
 	}
 
 	/* not for DVI mode */
@@ -2105,22 +2190,8 @@ static void dw_hdmi_update_phy_mask(struct dw_hdmi *hdmi)
 					  hdmi->rxsense);
 }
 
-static enum drm_connector_status
-dw_hdmi_connector_detect(struct drm_connector *connector, bool force)
-{
-	struct dw_hdmi *hdmi = container_of(connector, struct dw_hdmi,
-					     connector);
-
-	mutex_lock(&hdmi->mutex);
-	hdmi->force = DRM_FORCE_UNSPECIFIED;
-	dw_hdmi_update_power(hdmi);
-	dw_hdmi_update_phy_mask(hdmi);
-	mutex_unlock(&hdmi->mutex);
-
-	return hdmi->phy.ops->read_hpd(hdmi, hdmi->phy.data);
-}
-
-static int dw_hdmi_connector_get_modes(struct drm_connector *connector)
+static int dw_hdmi_connector_update_edid(struct drm_connector *connector,
+					  bool add_modes)
 {
 	struct dw_hdmi *hdmi = container_of(connector, struct dw_hdmi,
 					     connector);
@@ -2139,13 +2210,45 @@ static int dw_hdmi_connector_get_modes(struct drm_connector *connector)
 		hdmi->sink_has_audio = drm_detect_monitor_audio(edid);
 		drm_connector_update_edid_property(connector, edid);
 		cec_notifier_set_phys_addr_from_edid(hdmi->cec_notifier, edid);
-		ret = drm_add_edid_modes(connector, edid);
+		if (add_modes)
+			ret = drm_add_edid_modes(connector, edid);
+		else
+			drm_edid_to_eld(connector, edid);
+		dw_hdmi_update_eld(hdmi, connector->eld);
 		kfree(edid);
 	} else {
 		dev_dbg(hdmi->dev, "failed to get edid\n");
 	}
 
 	return ret;
+}
+
+static enum drm_connector_status
+dw_hdmi_connector_detect(struct drm_connector *connector, bool force)
+{
+	enum drm_connector_status status;
+	struct dw_hdmi *hdmi = container_of(connector, struct dw_hdmi,
+					     connector);
+
+	mutex_lock(&hdmi->mutex);
+	hdmi->force = DRM_FORCE_UNSPECIFIED;
+	dw_hdmi_update_power(hdmi);
+	dw_hdmi_update_phy_mask(hdmi);
+	mutex_unlock(&hdmi->mutex);
+
+	status = hdmi->phy.ops->read_hpd(hdmi, hdmi->phy.data);
+
+	if (status == connector_status_connected)
+		dw_hdmi_connector_update_edid(connector, false);
+	else
+		cec_notifier_set_phys_addr(hdmi->cec_notifier, CEC_PHYS_ADDR_INVALID);
+
+	return status;
+}
+
+static int dw_hdmi_connector_get_modes(struct drm_connector *connector)
+{
+	return dw_hdmi_connector_update_edid(connector, true);
 }
 
 static void dw_hdmi_connector_force(struct drm_connector *connector)
@@ -2355,10 +2458,6 @@ static irqreturn_t dw_hdmi_irq(int irq, void *dev_id)
 		dw_hdmi_setup_rx_sense(hdmi,
 				       phy_stat & HDMI_PHY_HPD,
 				       phy_stat & HDMI_PHY_RX_SENSE);
-
-		if ((phy_stat & (HDMI_PHY_RX_SENSE | HDMI_PHY_HPD)) == 0)
-			cec_notifier_set_phys_addr(hdmi->cec_notifier,
-						   CEC_PHYS_ADDR_INVALID);
 	}
 
 	if (intr_stat & HDMI_IH_PHY_STAT0_HPD) {
@@ -2746,6 +2845,7 @@ __dw_hdmi_probe(struct platform_device *pdev,
 		struct dw_hdmi_i2s_audio_data audio;
 
 		audio.hdmi	= hdmi;
+		audio.eld	= hdmi->connector.eld;
 		audio.write	= hdmi_writeb;
 		audio.read	= hdmi_readb;
 		hdmi->enable_audio = dw_hdmi_i2s_audio_enable;
@@ -2758,7 +2858,7 @@ __dw_hdmi_probe(struct platform_device *pdev,
 		hdmi->audio = platform_device_register_full(&pdevinfo);
 	}
 
-	if (config0 & HDMI_CONFIG0_CEC) {
+	if (!plat_data->is_cec_unusable && (config0 & HDMI_CONFIG0_CEC)) {
 		cec.hdmi = hdmi;
 		cec.ops = &dw_hdmi_cec_ops;
 		cec.irq = irq;
