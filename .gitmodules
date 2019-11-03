@@ -1,0 +1,6 @@
+[submodule "extra/mali"]
+	path = extra/mali
+	url = https://github.com/LibreELEC/mali-utgard.git
+[submodule "extra/rtl8189"]
+	path = extra/rtl8189
+	url = https://github.com/innerspacepilot/rtl8189ES_linux.git
