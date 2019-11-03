@@ -29,8 +29,8 @@
 
 #define CEDRUS_MIN_WIDTH	16U
 #define CEDRUS_MIN_HEIGHT	16U
-#define CEDRUS_MAX_WIDTH	3840U
-#define CEDRUS_MAX_HEIGHT	2160U
+#define CEDRUS_MAX_WIDTH	4096U
+#define CEDRUS_MAX_HEIGHT	2768U
 
 static struct cedrus_format cedrus_formats[] = {
 	{
@@ -38,8 +38,13 @@ static struct cedrus_format cedrus_formats[] = {
 		.directions	= CEDRUS_DECODE_SRC,
 	},
 	{
-		.pixelformat	= V4L2_PIX_FMT_H264_SLICE_RAW,
+		.pixelformat	= V4L2_PIX_FMT_H264_SLICE,
 		.directions	= CEDRUS_DECODE_SRC,
+	},
+	{
+		.pixelformat	= V4L2_PIX_FMT_HEVC_SLICE,
+		.directions	= CEDRUS_DECODE_SRC,
+		.capabilities	= CEDRUS_CAPABILITY_H265_DEC,
 	},
 	{
 		.pixelformat	= V4L2_PIX_FMT_SUNXI_TILED_NV12,
@@ -104,7 +109,8 @@ static void cedrus_prepare_format(struct v4l2_pix_format *pix_fmt)
 
 	switch (pix_fmt->pixelformat) {
 	case V4L2_PIX_FMT_MPEG2_SLICE:
-	case V4L2_PIX_FMT_H264_SLICE_RAW:
+	case V4L2_PIX_FMT_H264_SLICE:
+	case V4L2_PIX_FMT_HEVC_SLICE:
 		/* Zero bytes per line for encoded source. */
 		bytesperline = 0;
 
@@ -411,24 +417,22 @@ static void cedrus_queue_cleanup(struct vb2_queue *vq, u32 state)
 	}
 }
 
-static int cedrus_buf_init(struct vb2_buffer *vb)
-{
-	struct vb2_queue *vq = vb->vb2_queue;
-	struct cedrus_ctx *ctx = vb2_get_drv_priv(vq);
-
-	if (!V4L2_TYPE_IS_OUTPUT(vq->type))
-		ctx->dst_bufs[vb->index] = vb;
-
-	return 0;
-}
-
 static void cedrus_buf_cleanup(struct vb2_buffer *vb)
 {
 	struct vb2_queue *vq = vb->vb2_queue;
 	struct cedrus_ctx *ctx = vb2_get_drv_priv(vq);
 
-	if (!V4L2_TYPE_IS_OUTPUT(vq->type))
-		ctx->dst_bufs[vb->index] = NULL;
+	if (!V4L2_TYPE_IS_OUTPUT(vq->type)) {
+		struct cedrus_buffer *cedrus_buf;
+
+		cedrus_buf = vb2_to_cedrus_buffer(vq->bufs[vb->index]);
+
+		if (cedrus_buf->mv_col_buf_size)
+			dma_free_coherent(ctx->dev->dev,
+					  cedrus_buf->mv_col_buf_size,
+					  cedrus_buf->mv_col_buf,
+					  cedrus_buf->mv_col_buf_dma);
+	}
 }
 
 static int cedrus_buf_out_validate(struct vb2_buffer *vb)
@@ -469,8 +473,12 @@ static int cedrus_start_streaming(struct vb2_queue *vq, unsigned int count)
 		ctx->current_codec = CEDRUS_CODEC_MPEG2;
 		break;
 
-	case V4L2_PIX_FMT_H264_SLICE_RAW:
+	case V4L2_PIX_FMT_H264_SLICE:
 		ctx->current_codec = CEDRUS_CODEC_H264;
+		break;
+
+	case V4L2_PIX_FMT_HEVC_SLICE:
+		ctx->current_codec = CEDRUS_CODEC_H265;
 		break;
 
 	default:
@@ -517,7 +525,6 @@ static void cedrus_buf_request_complete(struct vb2_buffer *vb)
 static struct vb2_ops cedrus_qops = {
 	.queue_setup		= cedrus_queue_setup,
 	.buf_prepare		= cedrus_buf_prepare,
-	.buf_init		= cedrus_buf_init,
 	.buf_cleanup		= cedrus_buf_cleanup,
 	.buf_queue		= cedrus_buf_queue,
 	.buf_out_validate	= cedrus_buf_out_validate,

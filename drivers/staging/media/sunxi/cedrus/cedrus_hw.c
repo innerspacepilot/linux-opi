@@ -30,7 +30,8 @@
 #include "cedrus_hw.h"
 #include "cedrus_regs.h"
 
-int cedrus_engine_enable(struct cedrus_dev *dev, enum cedrus_codec codec)
+int cedrus_engine_enable(struct cedrus_dev *dev, enum cedrus_codec codec,
+			 unsigned int width)
 {
 	u32 reg = 0;
 
@@ -50,9 +51,18 @@ int cedrus_engine_enable(struct cedrus_dev *dev, enum cedrus_codec codec)
 		reg |= VE_MODE_DEC_H264;
 		break;
 
+	case CEDRUS_CODEC_H265:
+		reg |= VE_MODE_DEC_H265;
+		break;
+
 	default:
 		return -EINVAL;
 	}
+
+	if (width >= 4096)
+		reg |= BIT(22);
+	if (width > 2048)
+		reg |= BIT(21);
 
 	cedrus_write(dev, VE_MODE, reg);
 
@@ -78,9 +88,6 @@ void cedrus_dst_format_set(struct cedrus_dev *dev,
 
 		reg = VE_PRIMARY_OUT_FMT_NV12;
 		cedrus_write(dev, VE_PRIMARY_OUT_FMT, reg);
-
-		reg = VE_CHROMA_BUF_LEN_SDRT(chroma_size / 2);
-		cedrus_write(dev, VE_CHROMA_BUF_LEN, reg);
 
 		reg = chroma_size / 2;
 		cedrus_write(dev, VE_PRIMARY_CHROMA_BUF_LEN, reg);
