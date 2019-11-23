@@ -1,0 +1,8 @@
+version: "1"
+rules:
+  - base: master
+    upstream: gregkh/linux:master
+    mergeMethod: hardreset
+  - base: v5.3.y
+    upstream: gregkh/linux:v5.3.y
+    mergeMethod: hardreset
