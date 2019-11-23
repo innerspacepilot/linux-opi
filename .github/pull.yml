@@ -3,6 +3,6 @@ rules:
   - base: master
     upstream: gregkh:master
     mergeMethod: hardreset
-  - base: v5.3.y
-    upstream: gregkh:v5.3.y
+  - base: linux-5.3.y
+    upstream: gregkh:linux-5.3.y
     mergeMethod: hardreset
