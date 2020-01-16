@@ -116,6 +116,8 @@ struct snd_soc_jack;
 int hdmi_codec_set_jack_detect(struct snd_soc_component *component,
 			       struct snd_soc_jack *jack);
 
+void hdmi_codec_eld_notify(struct device *dev);
+
 #define HDMI_CODEC_DRV_NAME "hdmi-audio-codec"
 
 #endif /* __HDMI_CODEC_H__ */

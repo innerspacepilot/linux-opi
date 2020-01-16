@@ -102,12 +102,21 @@ static int dw_hdmi_i2s_hw_params(struct device *dev, void *data,
 	}
 
 	dw_hdmi_set_sample_rate(hdmi, hparms->sample_rate);
+	dw_hdmi_set_channel_status(hdmi, hparms->iec.status);
 	dw_hdmi_set_channel_count(hdmi, hparms->channels);
 	dw_hdmi_set_channel_allocation(hdmi, hparms->cea.channel_allocation);
 
 	hdmi_write(audio, inputclkfs, HDMI_AUD_INPUTCLKFS);
 	hdmi_write(audio, conf0, HDMI_AUD_CONF0);
 	hdmi_write(audio, conf1, HDMI_AUD_CONF1);
+
+	return 0;
+}
+
+static int dw_hdmi_i2s_audio_startup(struct device *dev, void *data)
+{
+	struct dw_hdmi_i2s_audio_data *audio = data;
+	struct dw_hdmi *hdmi = audio->hdmi;
 
 	dw_hdmi_audio_enable(hdmi);
 
@@ -120,6 +129,22 @@ static void dw_hdmi_i2s_audio_shutdown(struct device *dev, void *data)
 	struct dw_hdmi *hdmi = audio->hdmi;
 
 	dw_hdmi_audio_disable(hdmi);
+}
+
+static void dw_hdmi_i2s_update_eld(struct device *dev, u8 *eld)
+{
+	struct dw_hdmi_i2s_audio_data *audio = dev_get_platdata(dev);
+	struct platform_device *hcpdev = dev_get_drvdata(dev);
+
+	if (!audio || !hcpdev)
+		return;
+
+	if (!memcmp(audio->eld, eld, sizeof(audio->eld)))
+		return;
+
+	memcpy(audio->eld, eld, sizeof(audio->eld));
+
+	hdmi_codec_eld_notify(&hcpdev->dev);
 }
 
 static int dw_hdmi_i2s_get_eld(struct device *dev, void *data, uint8_t *buf,
@@ -153,6 +178,7 @@ static int dw_hdmi_i2s_get_dai_id(struct snd_soc_component *component,
 
 static struct hdmi_codec_ops dw_hdmi_i2s_ops = {
 	.hw_params	= dw_hdmi_i2s_hw_params,
+	.audio_startup  = dw_hdmi_i2s_audio_startup,
 	.audio_shutdown	= dw_hdmi_i2s_audio_shutdown,
 	.get_eld	= dw_hdmi_i2s_get_eld,
 	.get_dai_id	= dw_hdmi_i2s_get_dai_id,
@@ -184,12 +210,17 @@ static int snd_dw_hdmi_probe(struct platform_device *pdev)
 
 	dev_set_drvdata(&pdev->dev, platform);
 
+	dw_hdmi_set_update_eld(audio->hdmi, dw_hdmi_i2s_update_eld);
+
 	return 0;
 }
 
 static int snd_dw_hdmi_remove(struct platform_device *pdev)
 {
+	struct dw_hdmi_i2s_audio_data *audio = dev_get_platdata(&pdev->dev);
 	struct platform_device *platform = dev_get_drvdata(&pdev->dev);
+
+	dw_hdmi_set_update_eld(audio->hdmi, NULL);
 
 	platform_device_unregister(platform);
 
