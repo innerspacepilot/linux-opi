@@ -9,3 +9,6 @@ rules:
   - base: linux-5.4.y
     upstream: gregkh:linux-5.4.y
     mergeMethod: hardreset
+  - base: linux-5.5.y
+    upstream: gregkh:linux-5.5.y
+    mergeMethod: hardreset
